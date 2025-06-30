@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>TCWD Customer Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background: #f5f9ff;
+    }
+
+    h2 {
+      color: #2c3e50;
+    }
+
+    form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    input[type="text"], select {
+      padding: 10px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      flex: 1;
+      min-width: 180px;
+    }
+
+    button {
+      padding: 10px 14px;
+      font-size: 16px;
+      border: none;
+      background: #007acc;
+      color: white;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    a button {
+      margin-left: 5px;
+    }
+
+    button:hover {
+      opacity: 0.9;
+    }
+
+    .export-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .table-wrapper {
+      overflow-x: auto;
+      background: white;
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+      min-width: 800px;
+    }
+
+    th, td {
+      padding: 10px;
+      border: 1px solid #ccc;
+      text-align: left;
+    }
+
+    th {
+      background-color: #007acc;
+      color: white;
+    }
+
+    tr:nth-child(even) {
+      background-color: #f2f2f2;
+    }
+
+    .no-results {
+      color: #777;
+      margin-top: 20px;
+    }
+
+    @media (max-width: 768px) {
+      form {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      input[type="text"], select, button {
+        width: 100%;
+        margin-bottom: 10px;
+      }
+
+      .export-buttons {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      table {
+        font-size: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <h2>TCWD Customer Database</h2>
+
+  <form method="get">
+    <input type="text" name="q" id="search" placeholder="Search AccountNumber, MeterNo, or Name..." value="{{ search }}">
+    
+    <select name="status">
+      <option value="">All Status</option>
+      {% for status in statuses %}
+        <option value="{{ status }}" {% if selected_status == status %}selected{% endif %}>{{ status }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="bookno">
+      <option value="">All BookNo</option>
+      {% for b in booknos %}
+        <option value="{{ b }}" {% if selected_bookno == b %}selected{% endif %}>{{ b }}</option>
+      {% endfor %}
+    </select>
+
+    <button type="submit">Search</button>
+  </form>
+
+  <div class="export-buttons">
+    <a href="/export?q={{ search }}&status={{ selected_status }}&bookno={{ selected_bookno }}&format=csv">
+      <button style="background-color: #28a745;">Export CSV</button>
+    </a>
+    <a href="/export?q={{ search }}&status={{ selected_status }}&bookno={{ selected_bookno }}&format=excel">
+      <button style="background-color: #6f42c1;">Export Excel</button>
+    </a>
+  </div>
+
+  {% if rows %}
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            {% for col in columns %}
+              <th>{{ col }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              {% for i in range(columns|length) %}
+                <td
+                  {% if columns[i] == 'Status' %}
+                    style="font-weight: bold;
+                           color:
+                            {% if row[i] == 'ACTIVE' %}green
+                            {% elif row[i] == 'DISCONNECTED' %}red
+                            {% else %}black
+                            {% endif %}"
+                  {% endif %}
+                >
+                  {{ row[i] }}
+                </td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if total_pages > 1 %}
+      <div style="text-align: right; margin-top: 10px;">
+        {% if page > 1 %}
+          <a href="?q={{ search }}&status={{ selected_status }}&bookno={{ selected_bookno }}&page={{ page - 1 }}">
+            <button>Previous</button>
+          </a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a href="?q={{ search }}&status={{ selected_status }}&bookno={{ selected_bookno }}&page={{ page + 1 }}">
+            <button>Next</button>
+          </a>
+        {% endif %}
+        <span style="margin-left: 10px;">Page {{ page }} of {{ total_pages }}</span>
+      </div>
+    {% endif %}
+
+  {% else %}
+    <p class="no-results">No matching records found.</p>
+  {% endif %}
+
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      const searchInput = document.getElementById("search");
+      const suggestionBox = document.createElement('div');
+      suggestionBox.style.position = 'absolute';
+      suggestionBox.style.background = 'white';
+      suggestionBox.style.border = '1px solid #ccc';
+      suggestionBox.style.borderRadius = '8px';
+      suggestionBox.style.boxShadow = '0 2px 6px rgba(0,0,0,0.1)';
+      suggestionBox.style.zIndex = 999;
+      suggestionBox.style.width = searchInput.offsetWidth + 'px';
+      suggestionBox.style.maxHeight = '200px';
+      suggestionBox.style.overflowY = 'auto';
+      suggestionBox.style.display = 'none';
+      document.body.appendChild(suggestionBox);
+
+      searchInput.addEventListener('input', () => {
+        const query = searchInput.value;
+        if (query.length < 2) {
+          suggestionBox.style.display = 'none';
+          return;
+        }
+
+        fetch(`/suggest?term=${encodeURIComponent(query)}`)
+          .then(res => res.json())
+          .then(suggestions => {
+            suggestionBox.innerHTML = '';
+            if (suggestions.length === 0) {
+              suggestionBox.style.display = 'none';
+              return;
+            }
+
+            suggestions.forEach(text => {
+              const item = document.createElement('div');
+              item.style.padding = '8px 10px';
+              item.style.cursor = 'pointer';
+              item.textContent = text;
+              item.addEventListener('click', () => {
+                searchInput.value = text;
+                suggestionBox.style.display = 'none';
+                searchInput.form.submit();
+              });
+              suggestionBox.appendChild(item);
+            });
+
+            const rect = searchInput.getBoundingClientRect();
+            suggestionBox.style.top = (window.scrollY + rect.bottom) + 'px';
+            suggestionBox.style.left = (window.scrollX + rect.left) + 'px';
+            suggestionBox.style.width = rect.width + 'px';
+            suggestionBox.style.display = 'block';
+          });
+      });
+
+      document.addEventListener('click', (e) => {
+        if (!suggestionBox.contains(e.target) && e.target !== searchInput) {
+          suggestionBox.style.display = 'none';
+        }
+      });
+    });
+  </script>
+
+</body>
+</html>
