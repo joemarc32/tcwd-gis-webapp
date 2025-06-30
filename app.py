@@ -1,164 +1,140 @@
-from flask import Flask, render_template, request, jsonify, send_file
-import sqlite3
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, session
 import pandas as pd
+import sqlite3
 import io
-import os
 
 app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'
 
-DB_FILE = 'tcwd_database.db'
-TABLE = 'customers'
+DATABASE = 'tcwd_database.db'
+ITEMS_PER_PAGE = 15
 
-@app.route('/', methods=['GET'])
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        if request.form['username'] == 'tcwd' and request.form['password'] == 'tcwdcic':
+            session['logged_in'] = True
+            return redirect(url_for('index'))
+        else:
+            return render_template('login.html', error="Invalid credentials.")
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
+
+@app.route('/')
 def index():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+
     search = request.args.get('q', '')
-    status_filter = request.args.get('status', '')
-    bookno_filter = request.args.get('bookno', '')
+    status = request.args.get('status', '')
+    bookno = request.args.get('bookno', '')
     page = int(request.args.get('page', 1))
-    per_page = 15
-    offset = (page - 1) * per_page
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    like = f'%{search}%'
-
-    # Count total rows
-    count_sql = f"SELECT COUNT(*) FROM {TABLE} WHERE 1=1"
-    count_params = []
-
-    if search:
-        count_sql += " AND (AccountNumber LIKE ? OR MeterNo LIKE ? OR Name LIKE ?)"
-        count_params.extend([like, like, like])
-    if status_filter:
-        count_sql += " AND Status = ?"
-        count_params.append(status_filter)
-    if bookno_filter:
-        count_sql += " AND BookNo = ?"
-        count_params.append(bookno_filter)
-
-    cursor.execute(count_sql, count_params)
-    total_rows = cursor.fetchone()[0]
-    total_pages = (total_rows + per_page - 1) // per_page
-
-    # Retrieve paginated data
-    sql = f"SELECT * FROM {TABLE} WHERE 1=1"
+    query = "SELECT * FROM customers WHERE 1=1"
     params = []
 
     if search:
-        sql += " AND (AccountNumber LIKE ? OR MeterNo LIKE ? OR Name LIKE ?)"
-        params.extend([like, like, like])
-    if status_filter:
-        sql += " AND Status = ?"
-        params.append(status_filter)
-    if bookno_filter:
-        sql += " AND BookNo = ?"
-        params.append(bookno_filter)
+        query += " AND (Name LIKE ? OR AccountNumber LIKE ? OR MeterNo LIKE ?)"
+        like_term = f"%{search}%"
+        params.extend([like_term, like_term, like_term])
 
-    sql += " LIMIT ? OFFSET ?"
-    params.extend([per_page, offset])
+    if status:
+        query += " AND Status = ?"
+        params.append(status)
 
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    columns = [desc[0] for desc in cursor.description]
+    if bookno:
+        query += " AND BookNo = ?"
+        params.append(bookno)
 
-    # Get filter dropdowns
-    cursor.execute(f"SELECT DISTINCT Status FROM {TABLE} ORDER BY Status ASC")
-    statuses = [row[0] for row in cursor.fetchall()]
-    cursor.execute(f"SELECT DISTINCT BookNo FROM {TABLE} ORDER BY BookNo ASC")
-    booknos = [row[0] for row in cursor.fetchall()]
+    offset = (page - 1) * ITEMS_PER_PAGE
+    paginated_query = query + " LIMIT ? OFFSET ?"
+    params.extend([ITEMS_PER_PAGE, offset])
 
+    conn = get_db_connection()
+    rows = conn.execute(paginated_query, params).fetchall()
+    all_statuses = [row['Status'] for row in conn.execute("SELECT DISTINCT Status FROM customers").fetchall()]
+    all_booknos = [row['BookNo'] for row in conn.execute("SELECT DISTINCT BookNo FROM customers").fetchall()]
+    total_rows = conn.execute(f"SELECT COUNT(*) FROM ({query})", params[:-2]).fetchone()[0]
+    columns = [description[0] for description in conn.execute("SELECT * FROM customers LIMIT 1").description]
     conn.close()
+
+    total_pages = (total_rows + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
 
     return render_template(
         'index.html',
         rows=rows,
         columns=columns,
         search=search,
-        selected_status=status_filter,
-        selected_bookno=bookno_filter,
+        statuses=all_statuses,
+        selected_status=status,
+        booknos=all_booknos,
+        selected_bookno=bookno,
         page=page,
         total_pages=total_pages,
-        statuses=statuses,
-        booknos=booknos
+        zip=zip
     )
 
 @app.route('/suggest')
 def suggest():
     term = request.args.get('term', '')
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    sql = f"""
-    SELECT DISTINCT suggestion FROM (
-        SELECT AccountNumber AS suggestion FROM {TABLE} WHERE AccountNumber LIKE ?
-        UNION
-        SELECT MeterNo FROM {TABLE} WHERE MeterNo LIKE ?
-        UNION
-        SELECT Name FROM {TABLE} WHERE Name LIKE ?
-    )
-    ORDER BY suggestion ASC
-    LIMIT 5
-    """
-    like_term = f'%{term}%'
-    cursor.execute(sql, (like_term, like_term, like_term))
-    results = [row[0] for row in cursor.fetchall()]
+    conn = get_db_connection()
+    suggestions = conn.execute("""
+        SELECT Name FROM customers
+        WHERE Name LIKE ? OR AccountNumber LIKE ? OR MeterNo LIKE ?
+        LIMIT 5
+    """, (f'%{term}%', f'%{term}%', f'%{term}%')).fetchall()
     conn.close()
-    return jsonify(results)
+    return jsonify([row['Name'] for row in suggestions])
 
 @app.route('/export')
 def export():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+
     search = request.args.get('q', '')
-    status_filter = request.args.get('status', '')
-    bookno_filter = request.args.get('bookno', '')
-    format_type = request.args.get('format', 'csv')
+    status = request.args.get('status', '')
+    bookno = request.args.get('bookno', '')
+    format = request.args.get('format', 'csv')
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    sql = f"SELECT * FROM {TABLE} WHERE 1=1"
+    query = "SELECT * FROM customers WHERE 1=1"
     params = []
 
     if search:
-        like = f'%{search}%'
-        sql += " AND (AccountNumber LIKE ? OR MeterNo LIKE ? OR Name LIKE ?)"
-        params.extend([like, like, like])
-    if status_filter:
-        sql += " AND Status = ?"
-        params.append(status_filter)
-    if bookno_filter:
-        sql += " AND BookNo = ?"
-        params.append(bookno_filter)
+        query += " AND (Name LIKE ? OR AccountNumber LIKE ? OR MeterNo LIKE ?)"
+        like_term = f"%{search}%"
+        params.extend([like_term, like_term, like_term])
 
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    columns = [desc[0] for desc in cursor.description]
+    if status:
+        query += " AND Status = ?"
+        params.append(status)
+
+    if bookno:
+        query += " AND BookNo = ?"
+        params.append(bookno)
+
+    conn = get_db_connection()
+    df = pd.read_sql_query(query, conn, params=params)
     conn.close()
 
-    df = pd.DataFrame(rows, columns=columns)
-
-    if format_type == 'excel':
-        output = io.BytesIO()
+    output = io.BytesIO()
+    if format == 'excel':
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Filtered Data')
+            df.to_excel(writer, index=False, sheet_name='Data')
         output.seek(0)
-        return send_file(
-            output,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name='filtered_data.xlsx'
-        )
+        return send_file(output, download_name="filtered_data.xlsx", as_attachment=True)
     else:
-        output = io.StringIO()
         df.to_csv(output, index=False)
         output.seek(0)
-        return send_file(
-            io.BytesIO(output.getvalue().encode()),
-            mimetype='text/csv',
-            as_attachment=True,
-            download_name='filtered_data.csv'
-        )
+        return send_file(output, download_name="filtered_data.csv", as_attachment=True, mimetype='text/csv')
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(debug=True)
